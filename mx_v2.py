@@ -18,21 +18,24 @@ def get_bgp_sessions(device, filter_type):
         raise Exception("A conexão com o dispositivo foi encerrada. Reconectando...")
     try:
         bgp_information = device.rpc.get_bgp_neighbor_information({'format': 'json'})
+        #print(bgp_information) # To view data processing
         bgp_peers_info = bgp_information.get('bgp-information', [{}])
         bgp_peers = []
         for info in bgp_peers_info:
             peers = info.get('bgp-peer', [])
             for peer in peers:
                 peer_state = peer.get('peer-state', [{}])[0].get('data', '').lower()
+                peer_group = peer.get('peer-group', [{}])[0].get('data', '')
+                local_interface_name = peer.get('local-interface-name', [{}])[0].get('data', '')
                 if filter_type == 'all' or \
                    (filter_type == 'established' and peer_state == 'established') or \
                    (filter_type == 'not_established' and peer_state != 'established'):
-                    peer_group = peer.get('peer-group', [{}])[0].get('data', '')
                     peer_data = {
                         'peer-address': peer.get('peer-address', [{}])[0].get('data', ''),
                         'peer-as': peer.get('peer-as', [{}])[0].get('data', ''),
                         'peer-state': peer_state,
-                        'peer-group': peer_group  # Adicionado nome do grupo BGP
+                        'peer-group': peer_group,
+                        'local-interface-name': local_interface_name,
                     }
                     bgp_peers.append(peer_data)
         return bgp_peers
@@ -40,19 +43,42 @@ def get_bgp_sessions(device, filter_type):
         print(f"Erro ao obter informações BGP: {e}")
         return []
 
-def show_dashboard(bgp_sessions, filter_type):
+def refresh_bgp_sessions(router_device):
+    try:
+        if not router_device.connected:
+            router_device.open()
+        bgp_sessions = get_bgp_sessions(router_device, 'all')
+        
+        # Clears existing items in the TreeView
+        for item in tree.get_children():
+            tree.delete(item)
+        
+        # Populate the TreeView with the new data
+        for session in bgp_sessions:
+            peer_address = session['peer-address'].split('+')[0]  # Handle the IP address if necessary
+            tree.insert('', tk.END, values=(peer_address, session['peer-as'], session['peer-state'], session['peer-group'], session['local-interface-name']))
+    except Exception as e:
+        messagebox.showerror("Erro", f"Erro ao atualizar sessões BGP: {e}")
+
+def show_dashboard(bgp_sessions, filter_type, router_device):
+    global tree
     dashboard = tk.Toplevel()
     dashboard.title(f"BGP Sessions Dashboard - {filter_type.capitalize()}")
-    dashboard.geometry("600x400")
+    dashboard.geometry("1000x600")
 
-    columns = ('peer-address', 'peer-as', 'peer-state')
+    columns = ('peer-address', 'peer-as', 'peer-state', 'peer-group', 'local-interface-name')
     tree = ttk.Treeview(dashboard, columns=columns, show='headings')
     tree.heading('peer-address', text='Peer Address')
     tree.heading('peer-as', text='Peer ASN')
     tree.heading('peer-state', text='State')
+    tree.heading('peer-group', text='Peer Group')
+    tree.heading('local-interface-name', text='Interface')
+
+    refresh_button = ttk.Button(dashboard, text="Atualizar Dados", command=lambda: refresh_bgp_sessions(router_device))
+    refresh_button.pack(pady=10)
 
     for session in bgp_sessions:
-        tree.insert('', tk.END, values=(session['peer-address'], session['peer-as'], session['peer-state'], session['peer-group']))
+        tree.insert('', tk.END, values=(session['peer-address'], session['peer-as'], session['peer-state'], session['peer-group'], session['local-interface-name']))
 
     tree.pack(expand=True, fill='both')
 
@@ -64,7 +90,7 @@ def show_dashboard(bgp_sessions, filter_type):
         
             if len(session_info) >= 4:
                 peer_address_port = session_info[0]
-                # Extrai apenas o endereço IP, descartando a porta
+                # Extrats only the IP address, discarding the port
                 peer_ip = peer_address_port.split('+')[0]
                 peer_group = session_info[3]
             
@@ -74,7 +100,7 @@ def show_dashboard(bgp_sessions, filter_type):
                         username = entry_username.get()
                         password = entry_password.get()
                     
-                        # Chama a função de desativação com o endereço IP extraído
+                        # Calls the deactivation function with the estracted IP address
                         deactivate_bgp_session(host, username, password, peer_ip, peer_group)
                     
                         messagebox.showinfo("Sucesso", "Sessão BGP desativada com sucesso.")
@@ -97,19 +123,21 @@ def show_dashboard(bgp_sessions, filter_type):
 def generate_pdf(output_data):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=9)
+    pdf.set_font("Arial", size=5)
     pdf.cell(200, 10, txt="BGP Sessions Report", ln=True, align='C')
     pdf.ln(10)
-    header = ["Peer Address", "ASN", "State"]
+    header = ["Peer Address", "ASN", "State", "Peer Group", "Interface"]
     pdf.set_fill_color(169, 169, 169)
     pdf.set_text_color(0, 0, 0)
     for item in header:
-        pdf.cell(60, 10, txt=item, border=1, fill=True)
+        pdf.cell(39, 10, txt=item, border=1, fill=True)
     pdf.ln()
     for peer in output_data:
-        pdf.cell(60, 10, txt=peer['peer-address'], border=1)
-        pdf.cell(60, 10, txt=peer['peer-as'], border=1)
-        pdf.cell(60, 10, txt=peer['peer-state'], border=1)
+        pdf.cell(39, 10, txt=peer['peer-address'], border=1)
+        pdf.cell(39, 10, txt=peer['peer-as'], border=1)
+        pdf.cell(39, 10, txt=peer['peer-state'], border=1)
+        pdf.cell(39, 10, txt=peer['peer-group'], border=1)
+        pdf.cell(39, 10, txt=peer['local-interface-name'], border=1)
         pdf.ln()
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     pdf_output_filename = f"bgp_sessions_{timestamp}.pdf"
@@ -122,7 +150,7 @@ def deactivate_bgp_session(host, username, password, peer_ip, peer_group):
         with Device(host=host, user=username, passwd=password) as dev:
             dev.open()
             with Config(dev) as cu:
-                # Certifique-se de que o comando corresponde à sua configuração
+                # Make sure the command matches your configuration
                 set_command = f"deactivate protocols bgp group {peer_group} neighbor {peer_ip}"
                 cu.load(set_command, format='set', merge=True)
                 if cu.commit_check():
@@ -132,7 +160,7 @@ def deactivate_bgp_session(host, username, password, peer_ip, peer_group):
                     raise Exception("Falha ao validar a configuração antes do commit.")
     except Exception as e:
         print(f"Erro ao desativar sessão BGP: {e}")
-        raise  # Re-lança a exceção para ser capturada pelo chamador
+        raise  # Re-throw the exception to be caught by the caller
     
 def execute_script(ip, username, password, port, filter_type):
     router_device = connect_to_router(ip, username, password, port)
@@ -140,7 +168,7 @@ def execute_script(ip, username, password, port, filter_type):
         router_device.open()
         bgp_sessions_list = get_bgp_sessions(router_device, filter_type)
         if bgp_sessions_list:
-            show_dashboard(bgp_sessions_list, filter_type)
+            show_dashboard(bgp_sessions_list, filter_type, router_device)
         else:
             messagebox.showinfo("Information", f"No BGP sessions {filter_type} found.")
     except Exception as e:
@@ -169,7 +197,7 @@ def run_script(filter_type):
 
     execute_script(ip, username, password, port, filter_type)
 
-# Interface Gráfica
+# Graphic interface
 root = tk.Tk()
 root.title("Sessões BGP - by Raudinei")
 
@@ -181,7 +209,7 @@ style.configure("TLabel", background="#2C3E50", foreground="#ECF0F1")
 style.configure("TButton", background="#3498DB", foreground="#ECF0F1", width=20)
 style.configure("TEntry", fieldbackground="#EAECEE", foreground="#2C3E50")
 
-# Configuração do Tamanho da Janela e Posicionamento
+# Configuring Window Size and Positioning
 window_width = 400
 window_height = 200
 
@@ -193,7 +221,7 @@ y_coordinate = (screen_height / 2) - (window_height / 2)
 
 root.geometry(f"{window_width}x{window_height}+{int(x_coordinate)}+{int(y_coordinate)}")
 
-# Definição dos Widgets
+# Widget Definition
 label_ip = ttk.Label(root, text="Endereço IP:")
 label_username = ttk.Label(root, text="Usuário:")
 label_password = ttk.Label(root, text="Senha:")
@@ -208,7 +236,7 @@ button_run_all = ttk.Button(root, text="Todas as sessões", command=run_script_a
 button_run_established = ttk.Button(root, text="Estabelecidas", command=run_script_established)
 button_run_not_established = ttk.Button(root, text="Não estabelecidas", command=run_script_not_established)
 
-# Posicionamento dos Widgets usando grid
+# Widget positioning using grid
 label_ip.grid(row=0, column=0, padx=10, pady=5, sticky='W')
 entry_ip.grid(row=0, column=1, pady=5, sticky='WE')
 label_username.grid(row=1, column=0, padx=10, pady=5, sticky='W')
@@ -222,6 +250,6 @@ button_run_all.grid(row=0, column=2, padx=10, pady=5, sticky='WE')
 button_run_established.grid(row=1, column=2, padx=10, pady=5, sticky='WE')
 button_run_not_established.grid(row=2, column=2, padx=10, pady=5, sticky='WE')
 
-root.grid_columnconfigure(1, weight=1)  # Faz com que a coluna do meio (onde estão os Entry) expanda
+root.grid_columnconfigure(1, weight=1)  # Makes the middle column (where the Entries are) expand
 
 root.mainloop()
